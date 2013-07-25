@@ -1,8 +1,13 @@
 require 'date'
+require 'csv'
+
 
 unless defined? ONE_HOUR#silence warnings
-  ONE_HOUR = 60 * 60
-  ONE_DAY = 24 * ONE_HOUR
+  ONE_DAY = 1
+  ONE_HOUR = ONE_DAY/24.to_f
+  ONE_MINUTE = ONE_HOUR / 60
+  ONE_SECOND = ONE_MINUTE / 60
+
 end
 
 class ChatAggregator
@@ -17,25 +22,64 @@ class ChatAggregator
 
   attr_reader :events
 
-  #in a real use case, this class would provide a way to intake the event data from an external source,
-  #but for these purposes, I'm just populating it with test data
-  def initialize
-    generate_mock_data
+  def self.gen_mock_data
+    CSV.open("#{File.dirname(__FILE__)}/mock_data.csv", "wb") do |csv|
+      timestamp = DateTime.new(2013,7,21,12,5,21)
+
+      #here is our sample data:
+      names = %w{Ralph Barney Homer Marge Lisa Waylon Wendall Lionel Uder Kearny Nelson Troy Edna Doris}
+      comments = ["Hiya Homah",
+                  "Doh!",
+                  "Excellent",
+                  "sleep: that's where I'm a real viking",
+                  "i don't feel right",
+                  "My cat's name is mittens",
+                  "Where's the any key?",
+                  "I think I'll just order a tab"]
+
+
+
+      200.times do
+        event_type = ChatAggregator::EVENT_TYPES[rand(ChatAggregator::EVENT_TYPES.size)]
+        receiver, content = nil, nil
+        minutes = rand() * ONE_HOUR
+        days = minutes / ONE_DAY
+        timestamp += days
+        instigator = names[rand(names.size)]
+        if event_type == ChatAggregator::HIGH_FIVE
+          until !receiver.nil? && receiver != instigator
+            receiver = names[rand(names.size)]
+          end
+        elsif event_type == ChatAggregator::COMMENT
+          content = comments[rand(comments.size)]
+        end
+        csv << [event_type, timestamp, instigator, receiver, content]
+
+      end
+
+    end
+
   end
+
+  def initialize
+    @events = []
+  end
+
 
   def aggregate(start_time, interval)
     range = start_time..(start_time + interval)
-    @buckets = [[range.first,{}]]
+    buckets = [[range.first,{}]]
+    current_bucket = buckets.last
     @events.each do |event|
-      current_bucket = @buckets.last
       unless range.cover? event.timestamp
         range = (range.first + interval)..(range.last + interval)
-        @buckets << [range.first, {}]
+        buckets << [range.first, {}]
+        current_bucket = buckets.last
       end
       current_bucket[1][event.event_type] ||= 0
       current_bucket[1][event.event_type] += 1
     end
-    @buckets
+    buckets
   end
 
   class Event
@@ -53,61 +97,50 @@ class ChatAggregator
       @content = content
     end
 
+    def to_s
+      "#{@timestamp} - #{@event_type}"
+    end
+
   end
 
-private
-  def generate_mock_data
-    @events = []
-    timestamp = DateTime.new(2013,7,21,12,5,21)
 
-    #here is our sample data:
-    names = %w{Ralph Barney Homer Marge Lisa Waylon Wendall Lionel Uder Kearny Nelson Troy Edna Doris}
-    comments = ["Hiya Homah",
-                "Doh!",
-                "Excellent",
-                "sleep: that's where I'm a real viking",
-                "i don't feel right",
-                "My cat's name is mittens",
-                "Where's the any key?",
-                "I think I'll just order a tab"]
 
-    200.times do
-      event_type = ChatAggregator::EVENT_TYPES[rand(ChatAggregator::EVENT_TYPES.size)]
-      receiver, content = nil, nil
-      interval = rand(300) / ONE_DAY.to_f
-      timestamp += interval
-      instigator = names[rand(names.size)]
-      if event_type == ChatAggregator::HIGH_FIVE
-        until !receiver.nil? && receiver != instigator
-          receiver = names[rand(names.size)]
-        end
-      elsif event_type == ChatAggregator::COMMENT
-        content = comments[rand(comments.size)]
-      end
-
-      @events << Event.new(event_type, timestamp, instigator, receiver, content)
+  def read_mock_data
+    CSV.foreach("#{File.dirname(__FILE__)}/mock_data.csv", "r") do |csv|
+      type = csv[0].to_sym
+      timestamp = DateTime.strptime(csv[1])
+      instigator = csv[2]
+      receiver = csv[3]
+      content = csv[4]
+      @events << Event.new(type, timestamp, instigator, receiver, content)
     end
-    @events.freeze
+  end
+
+  def add_event(event)
+    @events << event
   end
 
 
 end
 
 if __FILE__ == $0
-  #puts "command line interface here"
-  #transcriber = ChatAggregator.new
+  puts "generating mock data..."
+  ChatAggregator.gen_mock_data
+  puts "successfully generated mock data"
 else
   require 'sinatra'
   require 'sinatra/reloader'
 
   class ChatTranscriptViewer < Sinatra::Base
 
-    configure :development do
-      register Sinatra::Reloader
-    end
+
+
 
     get '/' do
-      @transcriber ||= ChatAggregator.new
+      @aggregator ||= ChatAggregator.new
+      @aggregator.read_mock_data
+      td_style = "style='border: 1px solid black; padding: 5mm;'"
+      start_time = @aggregator.events.first.timestamp
 
       #didn't want this code to have a lot of dependencies,
       # so I'm doing the display logic here, in order
@@ -115,72 +148,39 @@ else
       # keep the number of files small
       granularity = params[:granularity]
       _response = case granularity
-                    when /hourly|daily/
-                      td_style = "style='border: 1px solid black; padding: 5mm;'"
-                      start_time = @transcriber.events.first.timestamp
+                    when 'hourly'
 
-                      time_format = if granularity == 'hourly'
-                                      rounded_start_time = start_time - start_time.minute * 60 - start_time.second
-                                      "%I %p"
-                                    else
-                                      rounded_start_time = start_time - start_time.hour * ONE_HOUR - start_time.minute * 60 - start_time.second
-                                      "%a %b %d, %Y"
-                                    end
-
+                      time_format = "%-I %p"
+                      rounded_start_time = start_time - start_time.minute * ONE_MINUTE - start_time.second * ONE_SECOND
                       table = "<table>"
-                      @transcriber.aggregate(rounded_start_time, ONE_HOUR).each do |bucket|
+                      @aggregator.aggregate(rounded_start_time, ONE_HOUR).each do |bucket|
                         time = bucket[0]
-                        event_totals = bucket[1]
-                        summaries = []
-                        if !(num_events = event_totals[ChatAggregator::ENTRY]).nil? && num_events > 0
-                          summaries << case num_events
-                                         when 1
-                                           "1 person entered"
-                                         else
-                                           "#{num_events} people entered"
-                                       end
-                        end
-
-                        if !(num_events = event_totals[ChatAggregator::EXIT]).nil? && num_events > 0
-                          summaries << case num_events
-                                         when 1
-                                           "1 person left"
-                                         else
-                                           "#{num_events} people left"
-                                       end
-                        end
-
-                        if !(num_events = event_totals[ChatAggregator::COMMENT]).nil? && num_events > 0
-                          summaries << case num_events
-                                         when 1
-                                           "1 comment"
-                                         else
-                                           "#{num_events} comments"
-                                       end
-                        end
-
-                        if !(num_events = event_totals[ChatAggregator::HIGH_FIVE]).nil? && num_events > 0
-                          summaries << case num_events
-                                         when 1
-                                           "1 high-five was exchanged"
-                                         else
-                                           "#{num_events} high-fives were exchanged"
-                                       end
-                        end
-
+                        summary = render_summary(bucket)
                         table += "<tr valign=top><td #{td_style}>#{time.strftime(time_format)}</td><td #{td_style}>" +
-                                 "#{summaries.join("<br /><br />")}</td>" +
-                                 "</tr>"
+                            "#{summary}</td>" +
+                            "</tr>"
                       end
                       table + "</table>"
+
                     when 'daily'
-                      start_time = @transcriber.events.first.timestamp
-                      rounded_start_time = start_time - start_time.minute * 60 - start_time.second
-                      @transcriber.aggregate rounded_start_time, ONE_DAY
+                      time_format = "%a %b %-d, %Y"
+                      rounded_start_time = start_time - start_time.hour * ONE_HOUR - start_time.minute * ONE_MINUTE - start_time.second * ONE_SECOND
+                      table = "<table>"
+                      @aggregator.aggregate(rounded_start_time, ONE_DAY).each do |bucket|
+                        if bucket[1].keys.size > 0
+                          time = bucket[0]
+                          summary = render_summary(bucket)
+                          table += "<tr valign=top><td #{td_style}>#{time.strftime(time_format)}</td><td #{td_style}>" +
+                              "#{summary}</td>" +
+                              "</tr>"
+                        end
+                      end
+                      table + "</table>"
+
                     else
 
-                      @transcriber.events.inject("") do |out, event|
-                        time = event.timestamp.strftime("%I:%M%p").downcase
+                      @aggregator.events.inject("") do |out, event|
+                        time = event.timestamp.strftime("%-I:%M %p").downcase
                         summary = "#{event.instigator} " + case event.event_type
                                                              when ChatAggregator::ENTRY
                                                                "enters the room"
@@ -198,6 +198,51 @@ else
                   end
 
       [200,{}, "<html><body>#{_response}</body></html>"]
+    end
+
+    private
+    def render_summary(bucket)
+      event_totals = bucket[1]
+      summaries = []
+
+       if !(entries = event_totals[ChatAggregator::ENTRY]).nil? && entries > 0
+        summaries << case entries
+                       when 1
+                         "1 person entered"
+                       else
+                         "#{entries} people entered"
+                     end
+      end
+
+      if !(exits = event_totals[ChatAggregator::EXIT]).nil? && exits > 0
+        summaries << case exits
+                       when 1
+                         "1 person left"
+                       else
+                         "#{exits} people left"
+                     end
+      end
+
+      if !(comments = event_totals[ChatAggregator::COMMENT]).nil? && comments > 0
+        summaries << case comments
+                       when 1
+                         "1 comment"
+                       else
+                         "#{comments} comments"
+                     end
+      end
+
+      if !(high_fives = event_totals[ChatAggregator::HIGH_FIVE]).nil? && high_fives > 0
+        summaries << case high_fives
+                       when 1
+                         "1 high-five was exchanged"
+                       else
+                         "#{high_fives} high-fives were exchanged"
+                     end
+      end
+
+
+      summaries.join("<br /><br />")
     end
 
   end
